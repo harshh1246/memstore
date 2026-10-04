@@ -5,44 +5,214 @@
 #include <cstring>
 #include <iostream>
 #include <cassert>
+#include <fcntl.h>
+#include <vector>
+#include <poll.h>
 
 #include "buffer_mgmt.h"
 
-int communicate(int client_fd){
+struct Connection {
+    int fd = -1;
+    bool want_read = false;
+    bool want_write = false;
+    bool closed = false;
+    std::vector<uint8_t> receive_buff;
+    std::vector<uint8_t> send_buff;  
+};
+
+
+// Both there functions together make a queue
+static void buf_append(std::vector<uint8_t> &buff, const uint8_t *data, size_t len) {
+    buff.insert(buff.end(), data, data + len);
+}
+
+static void buf_consume(std::vector<uint8_t> &buff, size_t n) {
+    buff.erase(buff.begin(), buff.begin() + n);
+}
+
+bool parse_write(Connection * connection){
+    char response[MAX_BUFF] = {};
+
+    std::cout << "Please type your response: ";
+    std::cin.getline(response, MAX_BUFF);
+
+    uint32_t len = strlen(response); 
+    
+    buf_append(connection->send_buff, (const uint8_t *)&len, 4);
+    buf_append(connection->send_buff, (uint8_t *)response, len);
+
+    buf_consume(connection->receive_buff, 4 + len);
+    return true;
+
+}
+
+bool parse_read(Connection *connection){
+    if (connection->receive_buff.size() < 4) {
+        return false;   // Didn't receive the header bytes
+    }
+
+    uint32_t len = 0;
+
+    memcpy(&len, connection->receive_buff.data(), 4);
+    
+    if (len > MAX_BUFF) {  // Message length is higher than allowed buffer size
+        connection->closed = true;
+        return false;   // want close
+    }
+
+    if (4 + len > connection->receive_buff.size()) {
+        return false;   // Full payload hasn't arrived yet
+    }
+
+    const char *request = reinterpret_cast<const char *>(connection->receive_buff.data() + 4);
+
+    printf("Client said: %s\n", request);
+    parse_write(connection);
+    return true;
+}
+
+static void set_nb(int fd){
+    int rv = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+
+    if (rv==-1){
+        std::cout << "Some error occured while changing file descriptor settings\n";
+    }
+}
+
+
+Connection* handle_accept(int listener_fd){
+        struct sockaddr_in client_addr = {};
+        socklen_t addrlen = sizeof(client_addr);
+        int client_fd = accept(listener_fd, (struct sockaddr *)&client_addr, &addrlen);
+
+        if (client_fd<0){
+            std::cerr << "Error in creating client connection";
+            return NULL;
+        }
+        std::cout << "A new client connected!\n" << std::endl;
+
+        set_nb(client_fd);
+
+        Connection *connection = new Connection();
+        connection->fd = client_fd;
+        connection->want_read = true;
+
+        return connection;
+}
+
+static void handle_read(Connection * connection){
+    uint8_t read_buff[64 * 1024];
+    
+    int rv = read(connection->fd, read_buff, sizeof(read_buff));
+    
+    if (rv<=0){
+        // std::cout << "Either connection is closed or there is some error\n" << std::endl;
+        connection->closed = true;
+        return;
+    }
+
+    buf_append(connection->receive_buff, read_buff, rv);
+    parse_read(connection);
+    
+    if (connection->send_buff.size() > 0) {    // has a response
+        connection->want_read = false;
+        connection->want_write = true;
+    }   // else: want read
+}
+
+static void handle_write(Connection *connection) {
+    assert(connection->send_buff.size() > 0);
+    ssize_t rv = write(connection->fd, connection->send_buff.data(), connection->send_buff.size());
+    
+    if (rv <= 0) {
+        connection->closed = true;    // error handling
+        return;
+    }
+    
+    buf_consume(connection->send_buff, (size_t)rv);
+
+    // parse_write(connection);
+    if (connection->send_buff.size() == 0) {   // all data written
+        connection->want_read = true;
+        connection->want_write = false;
+    } // else: want write
+}
+
+
+void event_loop(int listener_fd){
+    std::vector <Connection *> connections;
+    std::vector <struct pollfd> poll_args;
+
     while(true){
-        int32_t request_size = parse_len(client_fd);
+        poll_args.clear();
 
-        if(request_size == -1){
-            std::cerr << "Client disconnected or error reading request size\n";
-            return -1;
+        struct pollfd pfd = {listener_fd, POLLIN, 0};
+
+        poll_args.push_back(pfd);
+        for(Connection * conn : connections){
+
+            if (!conn){
+                continue;
+            }
+            struct pollfd pfd = {conn->fd, POLLERR, 0};
+
+            if(conn->want_read){
+                pfd.events |= POLLIN;
+            }
+
+            if(conn->want_write){
+                pfd.events |= POLLOUT;
+            }
+
+            poll_args.push_back(pfd);
         }
 
-        char read_buff[MAX_BUFF] = {};
-        if (read_all(client_fd, read_buff, request_size) < 0) {
-            std::cerr << "Error in reading from buffer\n";
-            return -1;
+        int rv = poll(poll_args.data(), (nfds_t)poll_args.size(), -1);
+
+        if (rv < 0 && errno == EINTR) {
+            continue;
+        }
+        if (rv < 0) {
+            std::cerr << "Some error occured while polling the fds";
         }
 
-        printf("client says %s\n", read_buff);
+        // Checking for the new connections
+        if(poll_args[0].revents){
+            if(Connection * connection = handle_accept(listener_fd)){
+                if (connections.size() <= connection->fd) {
+                    connections.resize(connection->fd + 1);
+                }
+                connections[connection->fd] = connection;
+            }
+        }
 
-        char response_buff[4+MAX_BUFF] = {};
+        for(int i=1; i<poll_args.size(); ++i){
+            int ready = poll_args[i].revents;
+            Connection * connection = connections[poll_args[i].fd];
+            
+            if(ready & POLLIN){
+                // Read the data
+                handle_read(connection);
+            }
 
-        char reply[MAX_BUFF];
+            if(ready & POLLOUT){
+                // Write the data
+                handle_write(connection);
+            }
 
-        std::cin.getline(reply, MAX_BUFF);
-        int reply_size = strlen(reply);
+            if((ready & POLLERR) || connection->closed){
+                // Connection closed; delete the connection
+                std::cout << "closing connection\n";
+                int rv = close(connection->fd);
+                if(rv==-1){
+                    std::cerr << "Error in closing connection: " << connection->fd << "\n" ;
+                }
+                connections[connection->fd] = NULL;
 
-        memcpy(response_buff, &reply_size, 4);
-        memcpy(&response_buff[4], reply, reply_size);
-
-        int err = write_all(client_fd, response_buff, 4 + reply_size);
-
-        if(err==-1){
-            std::cout << "Error occured while reading the output" << std::endl;
-            return -1;
+                delete connection;
+            }
         }
     }
-    return -1;
 }
 
 int main(){
@@ -72,30 +242,17 @@ int main(){
         std::cerr << "bind() failed";
     }
 
+
     rv = listen(listener_fd, SOMAXCONN);
     // Creates a socket queue and marks the socket as a passive socket that will be used to accept incoming connection requests. The second argument specifies the maximum number of pending connections that can be queued for this socket. SOMAXCONN is a constant that represents the maximum value allowed by the system for the backlog parameter, which is typically defined in the system headers. 
+
+    set_nb(listener_fd); // Setting listener file descriptor as non-blocking
 
     if (rv < 0) {
         std::cerr << "listen() failed";
     }   
     std::cout << "Server started listening on port 1234" << std::endl;
-    while (true) {
         // accept
-        struct sockaddr_in client_addr = {};
-
-        socklen_t addrlen = sizeof(client_addr);
-
-        int client_fd = accept(listener_fd, (struct sockaddr *)&client_addr, &addrlen);
-
-
-        if (client_fd<0){
-            std::cerr << "Error in creating client connection";
-            continue;
-        }
-        std::cout << "A new client connected!\n" << std::endl;
-
-        communicate(client_fd);
-        std::cout << "Connection Closed!" << std::endl;
-        close(client_fd);
-    }
+    event_loop(listener_fd);
+    std::cout << "Connection died\n";
 }

@@ -13,7 +13,7 @@ void communicate(int connection_fd){
         char payload[4+MAX_BUFF] = {};
 
         char text[MAX_BUFF];
-        std::cout << "Enter your message: " << std::endl;
+        std::cout << "Enter your message: ";
         std::cin.getline(text, MAX_BUFF);
 
         int text_size = strlen(text);
@@ -36,7 +36,7 @@ void communicate(int connection_fd){
             return;
         }
 
-        printf("server says %s\n", read_buff);
+        printf("server says: %s\n", read_buff);
     }
 
 }
