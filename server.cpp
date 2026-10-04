@@ -39,9 +39,8 @@ bool parse_write(Connection * connection){
     uint32_t len = strlen(response); 
     
     buf_append(connection->send_buff, (const uint8_t *)&len, 4);
-    buf_append(connection->send_buff, (uint8_t *)response, len);
+    buf_append(connection->send_buff, (const uint8_t *)response, len);
 
-    buf_consume(connection->receive_buff, 4 + len);
     return true;
 
 }
@@ -66,7 +65,10 @@ bool parse_read(Connection *connection){
 
     const char *request = reinterpret_cast<const char *>(connection->receive_buff.data() + 4);
 
-    printf("Client said: %s\n", request);
+    printf("Client said: %.*s\n", len, request);
+
+    buf_consume(connection->receive_buff, 4 + len);
+
     parse_write(connection);
     return true;
 }
@@ -177,7 +179,7 @@ void event_loop(int listener_fd){
         }
 
         // Checking for the new connections
-        if(poll_args[0].revents){
+        if(poll_args[0].revents & POLLIN){
             if(Connection * connection = handle_accept(listener_fd)){
                 if (connections.size() <= connection->fd) {
                     connections.resize(connection->fd + 1);
@@ -186,7 +188,7 @@ void event_loop(int listener_fd){
             }
         }
 
-        for(int i=1; i<poll_args.size(); ++i){
+        for(int i=1; i<poll_args.size(); i++){
             int ready = poll_args[i].revents;
             Connection * connection = connections[poll_args[i].fd];
             
