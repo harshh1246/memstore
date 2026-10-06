@@ -45,32 +45,33 @@ bool parse_write(Connection * connection){
 
 }
 
-bool parse_read(Connection *connection){
-    if (connection->receive_buff.size() < 4) {
-        return false;   // Didn't receive the header bytes
+void parse_read(Connection *connection){
+    while(true){
+        if (connection->receive_buff.size() < 4) {
+            return;   // Didn't receive the header bytes
+        }
+
+        uint32_t len = 0;
+
+        memcpy(&len, connection->receive_buff.data(), 4);
+        
+        if (len > MAX_BUFF) {  // Message length is higher than allowed buffer size
+            connection->closed = true;
+            return;   // want close
+        }
+
+        if (4 + len > connection->receive_buff.size()) {
+            return;   // Full payload hasn't arrived yet
+        }
+
+        const char *request = reinterpret_cast<const char *>(connection->receive_buff.data() + 4);
+
+        printf("Client said: %.*s\n", len, request);
+
+        buf_consume(connection->receive_buff, 4 + len);
+
+        parse_write(connection);
     }
-
-    uint32_t len = 0;
-
-    memcpy(&len, connection->receive_buff.data(), 4);
-    
-    if (len > MAX_BUFF) {  // Message length is higher than allowed buffer size
-        connection->closed = true;
-        return false;   // want close
-    }
-
-    if (4 + len > connection->receive_buff.size()) {
-        return false;   // Full payload hasn't arrived yet
-    }
-
-    const char *request = reinterpret_cast<const char *>(connection->receive_buff.data() + 4);
-
-    printf("Client said: %.*s\n", len, request);
-
-    buf_consume(connection->receive_buff, 4 + len);
-
-    parse_write(connection);
-    return true;
 }
 
 static void set_nb(int fd){
