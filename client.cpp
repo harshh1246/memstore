@@ -5,25 +5,67 @@
 #include <cstring>
 #include <cstdint>
 #include <iostream>
+#include <vector>
+#include <sstream>
 
 #include "buffer_mgmt.h"
 
+static void buf_append(std::vector<uint8_t> &buff, const uint8_t *data, size_t len) {
+    buff.insert(buff.end(), data, data + len);
+}
+
+static void buf_prepend(std::vector<uint8_t> &buff, const uint8_t *data, size_t len) {
+
+    buff.insert(buff.begin(), data, data + len);
+}
+
+static void buf_consume(std::vector<uint8_t> &buff, size_t n) {
+    buff.erase(buff.begin(), buff.begin() + n);
+}
+
 void communicate(int connection_fd){
+    std::vector<uint8_t> send_buff;
+
     while (true){
         char payload[4+MAX_BUFF] = {};
 
-        char text[MAX_BUFF];
+        char cmd[MAX_BUFF];
         std::cout << "Enter your message: ";
-        std::cin.getline(text, MAX_BUFF);
+        std::cin.getline(cmd, MAX_BUFF);
 
-        int text_size = strlen(text);
+        std::istringstream iss(cmd);
 
-        memcpy(payload, &text_size, 4);
-        memcpy(&payload[4], text, text_size);
+        std::string arg;
 
-        write_all(connection_fd, payload, 4+text_size);
+        uint32_t n_args = 0;
+        uint32_t cmd_size = 0;
+        
+        // 2. Extract words separated by spaces
+        while (iss >> arg) {
+            uint32_t arg_len = arg.length();
+            buf_append(send_buff, (uint8_t *)&arg_len, 4);
+            buf_append(
+                send_buff,
+                reinterpret_cast<const uint8_t*>(arg.data()),
+                arg_len
+            );
+            n_args++;
+            cmd_size += 4 + arg_len;
+        }
+        buf_prepend(send_buff, (uint8_t *)&n_args, 4);
+
+        cmd_size += 4;
+        buf_prepend(send_buff, (uint8_t *)&cmd_size, 4);
+
+        while(send_buff.size()!=0){
+            int rv = write(connection_fd, send_buff.data(), send_buff.size());
+            buf_consume(send_buff, rv);
+        }
 
         int32_t response_size = parse_len(connection_fd);
+        int32_t status_code = parse_len(connection_fd);
+
+        std::cout << status_code << "Status Code \n";
 
         if(response_size<0){
             std::cerr << "Error in retriving response size!";
@@ -31,7 +73,7 @@ void communicate(int connection_fd){
         
         char read_buff[MAX_BUFF] = {};
 
-        if (read_all(connection_fd, read_buff, response_size) < 0) {
+        if (read_all(connection_fd, read_buff, response_size-4) < 0) {
             std::cerr << "Error reading from socket";
             return;
         }

@@ -7,9 +7,18 @@
 #include <cassert>
 #include <fcntl.h>
 #include <vector>
+#include <map>
 #include <poll.h>
 
 #include "buffer_mgmt.h"
+
+static std::map<std::string, std::string> g_data;
+
+// Response Status
+int SUCC = 200;
+int BADREQ = 400;
+int NOTFND = 404;
+int INTERR = 500;
 
 struct Connection {
     int fd = -1;
@@ -20,6 +29,10 @@ struct Connection {
     std::vector<uint8_t> send_buff;  
 };
 
+struct Response{
+    int status = SUCC;
+    std::string content;
+};
 
 // Both there functions together make a queue
 static void buf_append(std::vector<uint8_t> &buff, const uint8_t *data, size_t len) {
@@ -30,19 +43,70 @@ static void buf_consume(std::vector<uint8_t> &buff, size_t n) {
     buff.erase(buff.begin(), buff.begin() + n);
 }
 
-bool parse_write(Connection * connection){
-    char response[MAX_BUFF] = {};
-
-    std::cout << "Please type your response: ";
-    std::cin.getline(response, MAX_BUFF);
-
-    uint32_t len = strlen(response); 
-    
+bool parse_write(Connection * connection, Response * response){
+    uint32_t len = 4 + response->content.length();
     buf_append(connection->send_buff, (const uint8_t *)&len, 4);
-    buf_append(connection->send_buff, (const uint8_t *)response, len);
+    buf_append(connection->send_buff, (const uint8_t *)&response->status, 4);
+    buf_append(connection->send_buff, reinterpret_cast<const uint8_t*>(response->content.data()), len);
 
     return true;
+}
 
+bool extract_cmds(const uint8_t *cmd_data, std::vector <std::string> &args, uint32_t len){
+    // Number of arguments in the command
+    uint32_t n_args = 0;
+
+    memcpy(&n_args, cmd_data, 4);
+
+    cmd_data += 4;
+    len -= 4;
+
+    uint32_t iter = 0;
+    while(len>iter){
+        uint32_t arg_len = 0;
+        memcpy(&arg_len, cmd_data + iter, 4);
+        iter += 4;
+
+        char arg[arg_len] = {};
+        memcpy(arg, cmd_data + iter, arg_len);
+        iter += arg_len;
+        args.push_back(std::string(arg, arg_len));
+        n_args -= 1;
+    }
+
+    if (n_args!=0){
+        return false;
+    }
+    return true;
+}
+
+void run_cmds(const std::vector <std::string> &args, Response *response){
+    // Currently only three commands are supported: GET, SET and DELETE
+    if (args[0]=="GET" && args.size()==2){
+        auto res = g_data.find(args[1]);
+        if(res != g_data.end()){
+            response->content = res->second;
+            response->status = SUCC;
+        }else{
+            response->content = "No such entry found";
+            response->status = NOTFND;
+        }
+    }
+    else if(args[0]=="SET" && args.size()==3){
+        g_data.insert({args[1], args[2]});
+        response -> status = SUCC;
+        response ->content = "Data saved successfully";
+    }
+    else if(args[0]=="DELETE" && args.size()==2){
+        g_data.erase(args[1]);
+        response->status = SUCC;
+        response ->content = "Deleted successfully";
+    }
+    else{
+        std::cerr << "Error in running commands";
+        response->status = BADREQ;
+        response->content = "Bad request";
+    }
 }
 
 void parse_read(Connection *connection){
@@ -60,17 +124,29 @@ void parse_read(Connection *connection){
             return;   // want close
         }
 
+        
         if (4 + len > connection->receive_buff.size()) {
             return;   // Full payload hasn't arrived yet
         }
 
-        const char *request = reinterpret_cast<const char *>(connection->receive_buff.data() + 4);
+        std::vector <std::string> args;
 
-        printf("Client said: %.*s\n", len, request);
+
+        bool err = extract_cmds(connection->receive_buff.data() + 4, args, len);
+
+        if (!err){
+            std::cerr << "Error in reading commands\n";
+            connection->closed = true;
+            return;
+        }
+
+        Response *response = new(Response);
+
+        run_cmds(args, response);
 
         buf_consume(connection->receive_buff, 4 + len);
-
-        parse_write(connection);
+        std::cout << "HEy" << std::endl;
+        parse_write(connection, response);
     }
 }
 
@@ -109,12 +185,13 @@ static void handle_read(Connection * connection){
     int rv = read(connection->fd, read_buff, sizeof(read_buff));
     
     if (rv<=0){
-        // std::cout << "Either connection is closed or there is some error\n" << std::endl;
+        std::cout << "Either connection is closed or there is some error\n" << std::endl;
         connection->closed = true;
         return;
     }
 
     buf_append(connection->receive_buff, read_buff, rv);
+
     parse_read(connection);
     
     if (connection->send_buff.size() > 0) {    // has a response
