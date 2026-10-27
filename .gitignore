@@ -1,1 +1,10 @@
-*
+# Binaries
+server
+client
+*.o
+*.out
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
